@@ -25,6 +25,7 @@ const _CLIENT_SCRIPTS := [
 	preload("res://addons/godot_ai/clients/opencode.gd"),
 	preload("res://addons/godot_ai/clients/qwen_code.gd"),
 	preload("res://addons/godot_ai/clients/kimi_code.gd"),
+	preload("res://addons/godot_ai/clients/zcode.gd"),
 ]
 
 static var _instances: Array[McpClient] = []

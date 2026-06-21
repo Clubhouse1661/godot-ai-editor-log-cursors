@@ -50,7 +50,7 @@ static func _build_cli(client: McpClient, server_name: String, server_url: Strin
 static func _build_json(client: McpClient, server_name: String, server_url: String, resolved_path: String) -> String:
 	var entry := McpJsonStrategy.build_entry(client, server_url)
 	var entry_text := _format_entry_inline(entry)
-	var key := client.server_key_path[0] if client.server_key_path.size() > 0 else "mcpServers"
+	var key := ".".join(McpClient._array_from_packed(client.server_key_path)) if client.server_key_path.size() > 0 else "mcpServers"
 	return "Edit %s and add under \"%s\":\n  \"%s\": %s" % [resolved_path, key, server_name, entry_text]
 
 

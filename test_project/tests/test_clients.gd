@@ -1765,6 +1765,49 @@ func test_vscode_uses_servers_key_with_type_http() -> void:
 	assert_eq(entry.get("url", ""), "http://x")
 
 
+func test_zcode_uses_cli_runtime_config_with_http_transport() -> void:
+	var c := McpClientRegistry.get_by_id("zcode")
+	assert_true(c != null, "zcode client must be registered")
+	assert_eq(c.config_type, "json")
+	assert_eq(c.server_key_path, PackedStringArray(["mcp", "servers"]))
+	assert_eq(c.path_template.get("windows"), "$USERPROFILE/.zcode/cli/config.json")
+	assert_eq(c.path_template.get("unix"), "~/.zcode/cli/config.json")
+
+	var entry := McpJsonStrategy.build_entry(c, "http://x")
+	assert_eq(entry.get("type"), "http")
+	assert_eq(entry.get("headers"), [])
+	assert_eq(entry.get("url"), "http://x")
+	assert_eq(c.entry_uvx_bridge, McpClient.UvxBridge.NONE)
+
+	var path := _scratch_dir.path_join("zcode.json")
+	_remove_if_exists(path)
+	var test_client := McpClient.new()
+	test_client.id = c.id
+	test_client.display_name = c.display_name
+	test_client.config_type = c.config_type
+	test_client.server_key_path = c.server_key_path
+	test_client.entry_extra_fields = c.entry_extra_fields
+	test_client.path_template = {"darwin": path, "windows": path, "linux": path, "unix": path}
+	var result := McpJsonStrategy.configure(test_client, "godot-ai", "http://127.0.0.1:8000/mcp")
+	assert_eq(result.get("status"), "ok")
+	var config = JSON.parse_string(FileAccess.get_file_as_string(path))
+	assert_true(config is Dictionary, "ZCode config must remain JSON object")
+	var mcp = config.get("mcp")
+	assert_true(mcp is Dictionary, "ZCode config should contain mcp object")
+	var servers = (mcp as Dictionary).get("servers")
+	assert_true(servers is Dictionary, "ZCode config should contain mcp.servers object")
+	var stored = (servers as Dictionary).get("godot-ai")
+	assert_true(stored is Dictionary, "ZCode config should contain godot-ai server entry")
+	assert_eq((stored as Dictionary).get("type"), "http")
+	assert_eq((stored as Dictionary).get("headers"), [])
+	assert_eq((stored as Dictionary).get("url"), "http://127.0.0.1:8000/mcp")
+
+	var manual := McpManualCommand.build(c, "godot-ai", "http://x", "/tmp/zcode.json")
+	assert_contains(manual, "\"mcp.servers\"")
+	assert_contains(manual, "\"type\": \"http\"")
+	assert_contains(manual, "\"headers\": []")
+
+
 func test_roo_code_pins_streamable_http_transport() -> void:
 	## Regression for #189: without an explicit "type", Roo defaults to SSE
 	## transport and our streamable-http /mcp endpoint returns HTTP 400.
