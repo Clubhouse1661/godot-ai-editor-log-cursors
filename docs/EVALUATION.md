@@ -37,13 +37,26 @@ different model or agent. For example, if evaluating GPT-5.5 + Codex, first run
 the GPT-5.5 + Codex no-MCP baseline. Godot AI changes must beat that baseline,
 not the DeepSeek + OpenHands baseline.
 
-## Upstream Harness
+## Harness
 
 Canonical repository:
 
 ```text
 https://github.com/waynchi/gamedevbench
 ```
+
+Current self-hosted evaluation fork:
+
+```text
+https://github.com/Clubhouse1661/gamedevbench
+branch: codex-godot-ai-mcp
+canonical base: waynchi/gamedevbench@6ce880f10bf1f7a0b96b739dc2bd8958e91f9f4b
+```
+
+Use the fork above for the current Codex + Godot AI scoreboard. The fork is
+acceptable because the gate is within-stack: all compared runs use the same
+harness branch, task list, model, and timeout. If the fork is later resynced to
+upstream, re-run the no-MCP baseline before comparing new numbers.
 
 The upstream harness already includes:
 
@@ -54,19 +67,16 @@ The upstream harness already includes:
 - a `godot-ai` MCP server option for OpenHands
 - a prompt-only `--encourage-verification` option
 
-Do not build a new benchmark harness before first trying to use upstream
-GameDevBench. If we need changes, prefer upstreaming small patches there.
-
-As of the local Phase 1 patch (`codex-godot-ai-mcp` in the GameDevBench fork),
-Codex can also wire `--mcp-server godot-ai`. Keep that patch upstreamed before
-treating Codex + Godot AI results as reproducible by other maintainers.
+The fork's `codex-godot-ai-mcp` branch adds the local evaluation pieces we need:
+Codex can wire `--mcp-server godot-ai`, each task gets an isolated temporary
+`CODEX_HOME`, and Godot AI can be resolved from a local checkout or git ref.
 
 ## Current Harness Caveats
 
 These caveats are load-bearing:
 
-- The upstream `godot-ai` path is currently pinned to a released package version
-  in `gamedevbench/src/mcp_registry.py`:
+- The default `godot-ai` path is pinned to a released package version in
+  `gamedevbench/src/mcp_registry.py`:
 
   ```python
   GODOT_AI_VERSION = "2.7.5"
@@ -75,17 +85,17 @@ These caveats are load-bearing:
   That is useful for reproducing the published row, but it does not evaluate
   current `main` or an open PR.
 
-- The version override must support local paths or git refs, not just semver.
-  We need to benchmark unreleased branches before merging them. A useful
-  upstream patch would allow inputs such as:
+- To benchmark unreleased branches, set `GAMEDEVBENCH_GODOT_AI_SOURCE` before
+  running the benchmark. It drives both `uvx --from ...` and the editor addon
+  checkout, keeping the server and plugin in lockstep:
 
   ```text
-  GODOT_AI_PACKAGE=git+https://github.com/hi-godot/godot-ai.git@main
-  GODOT_AI_PACKAGE=file:///absolute/path/to/godot-ai
+  GAMEDEVBENCH_GODOT_AI_SOURCE=local:/absolute/path/to/godot-ai
+  GAMEDEVBENCH_GODOT_AI_SOURCE=git+https://github.com/hi-godot/godot-ai.git@main
   ```
 
-  and then build both the `uvx --from ...` server package and the editor addon
-  checkout from the same source.
+  If unset, `GAMEDEVBENCH_GODOT_AI_VERSION` (default `2.7.5`) selects the
+  published package and matching `vX.Y.Z` addon tag.
 
 - In unpatched upstream GameDevBench, non-default MCP servers such as
   `godot-ai` are honored only by the OpenHands solver. The Phase 1 Codex patch
@@ -104,10 +114,10 @@ These caveats are load-bearing:
 
 ## Setup
 
-Clone and prepare GameDevBench outside this repository:
+Clone and prepare the evaluation fork outside this repository:
 
 ```bash
-git clone https://github.com/waynchi/gamedevbench.git
+git clone -b codex-godot-ai-mcp https://github.com/Clubhouse1661/gamedevbench.git
 cd gamedevbench
 bash unzip_tasks.sh
 uv run python validate_tasks.py
@@ -228,17 +238,17 @@ major setup mistakes before a full run.
 
 ### Current Godot AI
 
-Before using this for merge decisions, patch GameDevBench so `godot-ai` can be
-resolved from a local path or git ref. The benchmark must report the exact
-source it used, for example:
+For merge decisions, set the exact Godot AI source explicitly. The source should
+be recorded in the scorecard:
 
 ```text
-godot-ai source: git+https://github.com/hi-godot/godot-ai.git@<sha>
+godot-ai source: local:C:\Users\Administrator\Documents\Software_Projects\godot-ai
 ```
 
-Then rerun the same matrix with a run name that includes the git SHA:
+Example against a local checkout:
 
 ```bash
+export GAMEDEVBENCH_GODOT_AI_SOURCE=local:/absolute/path/to/godot-ai
 uv run python gamedevbench/src/benchmark_runner.py \
   --agent openhands \
   --model deepseek-v4-pro \
@@ -280,8 +290,9 @@ That evaluates the released package pinned in GameDevBench, currently
 `godot-ai==2.7.5`. It is useful as a shipped reference, but it is not the number
 that decides whether current Godot AI changes help.
 
-After the Phase 2 local/git-ref override lands, run the same command against
-Godot AI `main` and then the verification-nudge variant. The gate is:
+For current Godot AI, set `GAMEDEVBENCH_GODOT_AI_SOURCE` to the local checkout
+or a git ref, run the same command, and then run the verification-nudge variant.
+The gate is:
 
 ```text
 Codex + godot-ai@main must beat Codex no-MCP on the same task list.
