@@ -1057,6 +1057,22 @@ static func _parse_pid_lines(raw: String) -> Array[int]:
 	return PortResolver.parse_pid_lines(raw)
 
 
+func _create_server_process(cmd: String, args: Array[String]) -> int:
+	return OS.create_process(cmd, args)
+
+
+func _reserve_free_port_pair(preferred_http: int, preferred_ws: int) -> Dictionary:
+	return ClientConfigurator.reserve_free_port_pair(preferred_http, preferred_ws)
+
+
+func _release_port_pair_reservation(reservation: Dictionary) -> void:
+	ClientConfigurator.release_port_pair_reservation(reservation)
+
+
+func _configured_client_count_for_url(url: String) -> int:
+	return ClientConfigurator.configured_client_count_for_url(url)
+
+
 ## Find the managed server PID deterministically: prefer the pid-file
 ## the Python server writes on startup (see runtime_info.py), fall back
 ## to scraping `netstat -ano` / `lsof` only when the file is missing or

@@ -422,6 +422,7 @@ func start_server() -> void:
 	var current_version := _expected_server_version()
 	_server_expected_version = current_version
 
+	var port_pair_reservation: Dictionary = {}
 	if bool(_host._is_port_in_use(port)):
 		var record: Dictionary = _host._read_managed_server_record()
 		var record_version := str(record.get("version", ""))
@@ -466,21 +467,58 @@ func start_server() -> void:
 		## Forward `live` so the recovery proof helper reuses our snapshot.
 		## The kill invalidates it, so the failure arm re-probes below.
 		if not recover_strong_port_occupant(port, 3.0, live):
-			_host._server_started_this_session = true
-			var post_recovery_live: Dictionary = _host._probe_live_server_status_for_port(port)
-			_set_incompatible_server(post_recovery_live, current_version, port)
-			_startup_path = McpStartupPathScript.INCOMPATIBLE
-			push_warning(str(_server_status_message))
-			return
+			var blocked_http := port
+			var blocked_ws := ws_port
+			port_pair_reservation = _host._reserve_free_port_pair(blocked_http, blocked_ws)
+			if port_pair_reservation.is_empty():
+				_host._server_started_this_session = true
+				var post_recovery_live: Dictionary = _host._probe_live_server_status_for_port(port)
+				_set_incompatible_server(post_recovery_live, current_version, port)
+				_startup_path = McpStartupPathScript.INCOMPATIBLE
+				push_warning(str(_server_status_message))
+				return
+			port = int(port_pair_reservation.get("http", blocked_http))
+			ws_port = int(port_pair_reservation.get("ws", blocked_ws))
+			var changed_pair := bool(port_pair_reservation.get("changed", false))
+			if changed_pair:
+				var configured_clients: int = _host._configured_client_count_for_url(
+					"http://127.0.0.1:%d/mcp" % blocked_http
+				)
+				if configured_clients > 0:
+					_host._release_port_pair_reservation(port_pair_reservation)
+					port_pair_reservation = {}
+					_host._server_started_this_session = true
+					var post_recovery_live: Dictionary = _host._probe_live_server_status_for_port(blocked_http)
+					_set_incompatible_server(post_recovery_live, current_version, blocked_http)
+					_startup_path = McpStartupPathScript.INCOMPATIBLE
+					push_warning(str(_server_status_message))
+					return
+				ClientConfigurator.persist_port_pair(port, ws_port)
+			_host._set_resolved_ws_port(ws_port)
+			if changed_pair:
+				_host._clear_managed_server_record()
+				_host._clear_pid_file()
+				_startup_path = McpStartupPathScript.AUTO_PORT_PAIR
+				var auto_message := (
+					"HTTP port %d was occupied by another process; using HTTP %d / WS %d"
+					% [blocked_http, port, ws_port]
+				)
+				print("MCP | %s" % auto_message)
+				if _host._log_buffer != null:
+					_host._log_buffer.log(auto_message)
+			else:
+				_startup_path = McpStartupPathScript.FREE
 	else:
 		_startup_path = McpStartupPathScript.FREE
 
-	_host._set_resolved_ws_port(_host._resolve_ws_port())
-	ws_port = _host._resolved_ws_port
+	if port_pair_reservation.is_empty():
+		_host._set_resolved_ws_port(_host._resolve_ws_port())
+		ws_port = _host._resolved_ws_port
 
 	_host._startup_trace_count("server_command_discovery")
 	var server_cmd := ClientConfigurator.get_server_command()
 	if server_cmd.is_empty():
+		_host._release_port_pair_reservation(port_pair_reservation)
 		set_terminal_diagnosis(McpServerStateScript.NO_COMMAND)
 		_startup_path = McpStartupPathScript.NO_COMMAND
 		push_warning("MCP | could not find server command")
@@ -499,6 +537,7 @@ func start_server() -> void:
 	## fail silently with WinError 10013 inside a Hyper-V / WSL2 /
 	## Docker exclusion range; netstat shows nothing.
 	if WindowsPortReservation.is_port_excluded(port):
+		_host._release_port_pair_reservation(port_pair_reservation)
 		_host._server_started_this_session = true
 		set_terminal_diagnosis(McpServerStateScript.PORT_EXCLUDED)
 		_startup_path = McpStartupPathScript.RESERVED
@@ -549,7 +588,8 @@ func start_server() -> void:
 	## gates on this too.
 	var owner_env_set := _set_owner_pid_env()
 
-	_server_pid = OS.create_process(cmd, args)
+	_host._release_port_pair_reservation(port_pair_reservation)
+	_server_pid = _host._create_server_process(cmd, args)
 	var spawned_pid := int(_server_pid)
 
 	if owner_env_set:
@@ -577,7 +617,8 @@ func start_server() -> void:
 		## prepare_for_update_reload has something to kill. The next
 		## editor start's adopt branch heals it to the real port owner.
 		_host._write_managed_server_record(spawned_pid, current_version)
-		_startup_path = McpStartupPathScript.SPAWNED
+		if _startup_path != McpStartupPathScript.AUTO_PORT_PAIR:
+			_startup_path = McpStartupPathScript.SPAWNED
 		## Log "PYTHONPATH prefix=" rather than "PYTHONPATH=" so the line
 		## isn't misleading when an existing PYTHONPATH was present —
 		## we prepended `worktree_src`, not replaced. Keeps the log

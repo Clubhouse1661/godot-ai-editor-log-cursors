@@ -28,6 +28,12 @@ class _ProofPlugin extends GodotAiPlugin:
 	var cleared_record_calls := 0
 	var waited_calls := 0
 	var probe_calls := 0
+	var created_process_pid := 43210
+	var created_process_cmd := ""
+	var created_process_args: Array[String] = []
+	var port_pair_reservation: Dictionary = {}
+	var released_port_pair_reservations: Array[Dictionary] = []
+	var configured_client_count := 0
 
 	func _find_all_pids_on_port(_port: int) -> Array[int]:
 		var pids: Array[int] = []
@@ -72,11 +78,29 @@ class _ProofPlugin extends GodotAiPlugin:
 	func _clear_managed_server_record() -> void:
 		cleared_record_calls += 1
 
+	func _create_server_process(cmd: String, args: Array[String]) -> int:
+		created_process_cmd = cmd
+		created_process_args.assign(args)
+		return created_process_pid
+
+	func _reserve_free_port_pair(_preferred_http: int, _preferred_ws: int) -> Dictionary:
+		return port_pair_reservation.duplicate()
+
+	func _release_port_pair_reservation(reservation: Dictionary) -> void:
+		if not reservation.is_empty():
+			released_port_pair_reservations.append(reservation.duplicate())
+
+	func _configured_client_count_for_url(_url: String) -> int:
+		return configured_client_count
+
 
 ## Test port high enough to almost never collide with real services and
 ## distinct from the plugin's configured http_port() so the stop-finalize tests
 ## don't interact with a developer's running managed server.
 const TEST_PORT := 65432
+
+var _saved_http_port: Variant = null
+var _saved_ws_port: Variant = null
 
 
 func suite_name() -> String:
@@ -87,6 +111,8 @@ func setup() -> void:
 	## The flag is a class-level static; leave it in a known state between
 	## tests so ordering can't mask a regression.
 	GodotAiPlugin._server_started_this_session = false
+	_saved_http_port = _read_http_port_setting()
+	_saved_ws_port = _read_ws_port_setting()
 
 
 func teardown() -> void:
@@ -103,6 +129,7 @@ func teardown() -> void:
 			es.set_setting(GodotAiPlugin.MANAGED_SERVER_WS_PORT_SETTING, 0)
 	if FileAccess.file_exists(GodotAiPlugin.SERVER_PID_FILE):
 		DirAccess.remove_absolute(ProjectSettings.globalize_path(GodotAiPlugin.SERVER_PID_FILE))
+	_restore_port_settings()
 
 
 func test_exit_tree_resets_spawn_guard() -> void:
@@ -1043,6 +1070,93 @@ func test_drift_kill_preserves_record_and_does_not_spawn_when_port_stays_held() 
 	assert_eq(server_pid, -1, "drift branch must not spawn while the port is still held")
 
 
+func test_foreign_port_auto_selects_free_pair_and_spawns_there() -> void:
+	var server_cmd := McpClientConfigurator.get_server_command()
+	if server_cmd.is_empty():
+		skip("no server command available in this env")
+		return
+	McpClientConfigurator.persist_port_pair(65426, 65427)
+	var plugin := _ProofPlugin.new()
+	plugin.port_in_use = true
+	plugin.listener_pids = [24680] as Array[int]
+	plugin.live_status = {"name": "other-server", "version": "", "ws_port": 0, "status_code": 404}
+	plugin.port_pair_reservation = {"http": 8123, "ws": 9501, "changed": true}
+
+	plugin._start_server()
+	var status := plugin.get_server_status()
+	var startup_path: String = plugin._lifecycle.get_startup_path()
+	var spawned_pid := int(plugin._lifecycle._server_pid)
+	var args := plugin.created_process_args.duplicate()
+	var http_after := McpClientConfigurator.http_port()
+	var ws_after := McpClientConfigurator.ws_port()
+	var resolved_ws := plugin.get_resolved_ws_port()
+	plugin.free()
+
+	assert_eq(int(status.get("state", -1)), McpServerState.SPAWNING)
+	assert_eq(startup_path, McpStartupPath.AUTO_PORT_PAIR)
+	assert_eq(spawned_pid, 43210)
+	assert_ne(http_after, 65426)
+	assert_ne(ws_after, 65427)
+	assert_eq(resolved_ws, ws_after)
+	assert_contains(args, "--port")
+	assert_contains(args, str(http_after))
+	assert_contains(args, "--ws-port")
+	assert_contains(args, str(ws_after))
+
+
+func test_foreign_port_with_configured_clients_keeps_conflict_path() -> void:
+	var server_cmd := McpClientConfigurator.get_server_command()
+	if server_cmd.is_empty():
+		skip("no server command available in this env")
+		return
+	McpClientConfigurator.persist_port_pair(65430, 65431)
+	var plugin := _ProofPlugin.new()
+	plugin.port_in_use = true
+	plugin.listener_pids = [24680] as Array[int]
+	plugin.live_status = {"name": "other-server", "version": "", "ws_port": 0, "status_code": 404}
+	plugin.port_pair_reservation = {"http": 8123, "ws": 9501, "changed": true}
+	plugin.configured_client_count = 1
+
+	plugin._start_server()
+	var status := plugin.get_server_status()
+	var startup_path: String = plugin._lifecycle.get_startup_path()
+	var released := plugin.released_port_pair_reservations.size()
+	var http_after := McpClientConfigurator.http_port()
+	var ws_after := McpClientConfigurator.ws_port()
+	plugin.free()
+
+	assert_eq(int(status.get("state", -1)), McpServerState.INCOMPATIBLE)
+	assert_eq(startup_path, McpStartupPath.INCOMPATIBLE)
+	assert_eq(released, 1, "held fallback sockets must be released when auto-shift is refused")
+	assert_eq(http_after, 65430)
+	assert_eq(ws_after, 65431)
+
+
+func test_recoverable_godot_ai_server_does_not_auto_shift_ports() -> void:
+	var server_cmd := McpClientConfigurator.get_server_command()
+	if server_cmd.is_empty():
+		skip("no server command available in this env")
+		return
+	McpClientConfigurator.persist_port_pair(65428, 65429)
+	var plugin := _ProofPlugin.new()
+	plugin.port_in_use_sequence = [true, false] as Array[bool]
+	plugin.listener_pids = [24680] as Array[int]
+	plugin.live_status = {"name": "godot-ai", "version": "old-managed-for-test", "ws_port": 65429, "status_code": 200}
+	plugin.managed_record = {"pid": 24680, "version": "old-managed-for-test", "ws_port": 65429}
+	plugin.alive_pids = [24680] as Array[int]
+	plugin.branded_pids = [24680] as Array[int]
+
+	plugin._start_server()
+	var killed := plugin.killed_targets.duplicate()
+	var http_after := McpClientConfigurator.http_port()
+	var ws_after := McpClientConfigurator.ws_port()
+	plugin.free()
+
+	assert_eq(killed, [24680] as Array[int])
+	assert_eq(http_after, 65428)
+	assert_eq(ws_after, 65429)
+
+
 func test_force_restart_preserves_record_when_port_remains_held() -> void:
 	var plugin := _ProofPlugin.new()
 	plugin.port_in_use = true
@@ -1460,3 +1574,31 @@ func _read_record_version() -> String:
 	if es == null or not es.has_setting(GodotAiPlugin.MANAGED_SERVER_VERSION_SETTING):
 		return ""
 	return str(es.get_setting(GodotAiPlugin.MANAGED_SERVER_VERSION_SETTING))
+
+
+func _read_http_port_setting() -> Variant:
+	var es := EditorInterface.get_editor_settings()
+	if es == null or not es.has_setting(McpSettings.SETTING_HTTP_PORT):
+		return null
+	return es.get_setting(McpSettings.SETTING_HTTP_PORT)
+
+
+func _read_ws_port_setting() -> Variant:
+	var es := EditorInterface.get_editor_settings()
+	if es == null or not es.has_setting(McpClientConfigurator.SETTING_WS_PORT):
+		return null
+	return es.get_setting(McpClientConfigurator.SETTING_WS_PORT)
+
+
+func _restore_port_settings() -> void:
+	var es := EditorInterface.get_editor_settings()
+	if es == null:
+		return
+	es.set_setting(
+		McpSettings.SETTING_HTTP_PORT,
+		McpClientConfigurator.DEFAULT_HTTP_PORT if _saved_http_port == null else _saved_http_port
+	)
+	es.set_setting(
+		McpClientConfigurator.SETTING_WS_PORT,
+		McpClientConfigurator.DEFAULT_WS_PORT if _saved_ws_port == null else _saved_ws_port
+	)

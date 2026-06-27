@@ -663,6 +663,84 @@ func test_http_url_uses_current_http_port() -> void:
 	)
 
 
+func test_reserve_free_port_pair_keeps_bindable_preferred_pair() -> void:
+	var http := 65420
+	var ws := 65421
+	if not _can_bind_port_pair(http, ws):
+		skip("preferred test ports are occupied")
+		return
+
+	var reservation := McpClientConfigurator.reserve_free_port_pair(http, ws)
+	var chosen_http := int(reservation.get("http", 0))
+	var chosen_ws := int(reservation.get("ws", 0))
+	var changed := bool(reservation.get("changed", true))
+	McpClientConfigurator.release_port_pair_reservation(reservation)
+
+	assert_eq(chosen_http, http)
+	assert_eq(chosen_ws, ws)
+	assert_false(changed)
+
+
+func test_reserve_free_port_pair_skips_occupied_preferred_pair() -> void:
+	var http := 65422
+	var ws := 65423
+	if not _can_bind_port_pair(http, ws):
+		skip("preferred test ports are occupied")
+		return
+	var held := TCPServer.new()
+	var err := held.listen(http, "127.0.0.1")
+	assert_eq(err, OK, "test setup must hold the preferred HTTP port")
+
+	var reservation := McpClientConfigurator.reserve_free_port_pair(http, ws)
+	var chosen_http := int(reservation.get("http", 0))
+	var chosen_ws := int(reservation.get("ws", 0))
+	var changed := bool(reservation.get("changed", false))
+	McpClientConfigurator.release_port_pair_reservation(reservation)
+	held.stop()
+
+	assert_false(reservation.is_empty(), "finder should return a fallback pair")
+	assert_ne(chosen_http, http, "fallback must not reuse the occupied HTTP port")
+	assert_ne(chosen_ws, ws, "fallback should move the WS side with the pair")
+	assert_true(changed)
+	assert_true(_can_bind_port_pair(chosen_http, chosen_ws), "released fallback pair should be bindable")
+
+
+func test_reserve_free_port_pair_skips_candidate_when_one_side_is_held() -> void:
+	var http := 65424
+	var ws := 65425
+	if not _can_bind_port_pair(http, ws):
+		skip("preferred test ports are occupied")
+		return
+	var preferred_holder := TCPServer.new()
+	var first_ws_holder := TCPServer.new()
+	var first_pair := McpClientConfigurator.AUTO_PORT_PAIR_CANDIDATES[0]
+	var preferred_err := preferred_holder.listen(http, "127.0.0.1")
+	var first_ws_err := first_ws_holder.listen(first_pair.y, "127.0.0.1")
+	if preferred_err != OK or first_ws_err != OK:
+		preferred_holder.stop()
+		first_ws_holder.stop()
+		skip("candidate test ports are occupied")
+		return
+
+	var reservation := McpClientConfigurator.reserve_free_port_pair(http, ws)
+	var chosen_http := int(reservation.get("http", 0))
+	var chosen_ws := int(reservation.get("ws", 0))
+	McpClientConfigurator.release_port_pair_reservation(reservation)
+	preferred_holder.stop()
+	first_ws_holder.stop()
+
+	assert_false(reservation.is_empty(), "finder should skip the partially held candidate")
+	assert_true(chosen_http != first_pair.x or chosen_ws != first_pair.y)
+
+
+func test_persist_port_pair_updates_http_and_ws_settings() -> void:
+	_clear_port_settings()
+	McpClientConfigurator.persist_port_pair(8123, 9501)
+	assert_eq(McpClientConfigurator.http_port(), 8123)
+	assert_eq(McpClientConfigurator.ws_port(), 9501)
+	_clear_port_settings()
+
+
 # ----- path template -----
 
 func test_path_template_expands_home() -> void:
@@ -2077,6 +2155,20 @@ func _touch_file(path: String) -> void:
 	var f := FileAccess.open(path, FileAccess.WRITE)
 	assert_true(f != null, "Failed to create scratch file at %s" % path)
 	f.close()
+
+
+func _can_bind_port_pair(http: int, ws: int) -> bool:
+	var http_server := TCPServer.new()
+	var http_err := http_server.listen(http, "127.0.0.1")
+	if http_err != OK:
+		return false
+	var ws_server := TCPServer.new()
+	var ws_err := ws_server.listen(ws, "127.0.0.1")
+	http_server.stop()
+	if ws_err != OK:
+		return false
+	ws_server.stop()
+	return true
 
 
 ## Reset http/ws port overrides to the built-in defaults for the duration of

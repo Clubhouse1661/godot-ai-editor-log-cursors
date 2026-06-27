@@ -88,8 +88,10 @@ Kimi Code.
 
 </details>
 
-Server URL is always `http://127.0.0.1:8000/mcp`. If auto-configure can't find
-a CLI, each dock row exposes a **Run this manually** panel with a copyable
+Server URL defaults to `http://127.0.0.1:8000/mcp`. If another app is already
+using the default ports, the plugin picks a free HTTP/WS pair, saves it in
+Editor Settings, and shows the active URL in the dock. If auto-configure can't
+find a CLI, each dock row exposes a **Run this manually** panel with a copyable
 snippet.
 
 ### 4. Try it
@@ -117,6 +119,8 @@ snippet.
 ```bash
 claude mcp add --scope user --transport http godot-ai http://127.0.0.1:8000/mcp
 ```
+
+If the dock shows a different HTTP port, use that URL instead.
 
 **Codex** (`~/.codex/config.toml`)
 

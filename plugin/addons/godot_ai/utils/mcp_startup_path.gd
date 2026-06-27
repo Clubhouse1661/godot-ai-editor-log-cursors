@@ -32,3 +32,6 @@ const INCOMPATIBLE := "incompatible"
 ## Port was free at start; this is the prelude to SPAWNED but kept as
 ## a distinct path so adopt-vs-spawn is unambiguous in the trace.
 const FREE := "free"
+## Preferred HTTP/WS ports were held by a foreign process, so startup picked
+## and persisted a free pair before spawning.
+const AUTO_PORT_PAIR := "auto_port_pair"

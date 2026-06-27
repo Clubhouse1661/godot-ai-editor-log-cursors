@@ -40,6 +40,16 @@ const MAX_PORT := 65535
 const SETTING_WS_PORT := "godot_ai/ws_port"
 const SETTING_STARTUP_TRACE := "godot_ai/log_startup_timing"
 const _DISCOVERY_TIMEOUT_MS := 3000
+const AUTO_PORT_PAIR_CANDIDATES: Array[Vector2i] = [
+	Vector2i(8123, 9501),
+	Vector2i(8217, 9601),
+	Vector2i(8317, 9617),
+	Vector2i(8423, 9723),
+	Vector2i(8611, 9811),
+	Vector2i(8849, 9849),
+	Vector2i(9137, 9917),
+	Vector2i(9323, 10023),
+]
 
 
 ## Active HTTP port: user override (if in range) or `DEFAULT_HTTP_PORT`.
@@ -54,6 +64,14 @@ static func ws_port() -> int:
 
 static func http_url() -> String:
 	return "http://127.0.0.1:%d/mcp" % http_port()
+
+
+static func persist_port_pair(http: int, ws: int) -> void:
+	var es := EditorInterface.get_editor_settings()
+	if es == null:
+		return
+	es.set_setting(McpSettings.SETTING_HTTP_PORT, clampi(http, MIN_PORT, MAX_PORT))
+	es.set_setting(SETTING_WS_PORT, clampi(ws, MIN_PORT, MAX_PORT))
 
 
 static func _read_port_setting(key: String, default_port: int) -> int:
@@ -143,6 +161,70 @@ static func suggest_free_port(start: int, span: int = 2048) -> int:
 	return WindowsPortReservation.suggest_non_excluded_port(candidate, span, MAX_PORT)
 
 
+## Reserve a bindable HTTP/WS loopback pair and return the held TCPServer
+## objects alongside the ports. Call `release_port_pair_reservation` just
+## before spawning the Python server so the probe uses the same bind surface
+## as the real process while keeping the probe-release window tiny.
+static func reserve_free_port_pair(preferred_http: int, preferred_ws: int) -> Dictionary:
+	var preferred := _try_reserve_port_pair(preferred_http, preferred_ws)
+	if not preferred.is_empty():
+		preferred["changed"] = false
+		return preferred
+
+	for pair in AUTO_PORT_PAIR_CANDIDATES:
+		var candidate := _try_reserve_port_pair(pair.x, pair.y)
+		if not candidate.is_empty():
+			candidate["changed"] = pair.x != preferred_http or pair.y != preferred_ws
+			return candidate
+
+	var start_http := clampi(maxi(preferred_http + 1, 8123), MIN_PORT, MAX_PORT - 1)
+	var start_ws := clampi(maxi(preferred_ws + 1, 9501), MIN_PORT, MAX_PORT)
+	var scan_limit := mini(start_http + 2048, MAX_PORT - 1500)
+	var http := start_http
+	while http <= scan_limit:
+		var ws := start_ws + (http - start_http)
+		if ws <= MAX_PORT:
+			var scanned := _try_reserve_port_pair(http, ws)
+			if not scanned.is_empty():
+				scanned["changed"] = true
+				return scanned
+		http += 1
+	return {}
+
+
+static func release_port_pair_reservation(reservation: Dictionary) -> void:
+	for key in ["http_server", "ws_server"]:
+		var server = reservation.get(key, null)
+		if server is TCPServer:
+			(server as TCPServer).stop()
+
+
+static func _try_reserve_port_pair(http: int, ws: int) -> Dictionary:
+	if not _port_in_range(http) or not _port_in_range(ws) or http == ws:
+		return {}
+	if WindowsPortReservation.is_port_excluded(http) or WindowsPortReservation.is_port_excluded(ws):
+		return {}
+	var http_server := TCPServer.new()
+	var http_err := http_server.listen(http, "127.0.0.1")
+	if http_err != OK:
+		return {}
+	var ws_server := TCPServer.new()
+	var ws_err := ws_server.listen(ws, "127.0.0.1")
+	if ws_err != OK:
+		http_server.stop()
+		return {}
+	return {
+		"http": http,
+		"ws": ws,
+		"http_server": http_server,
+		"ws_server": ws_server,
+	}
+
+
+static func _port_in_range(port: int) -> bool:
+	return port >= MIN_PORT and port <= MAX_PORT
+
+
 # --- Client operations (string id) ---------------------------------------
 
 static func client_ids() -> PackedStringArray:
@@ -192,6 +274,15 @@ static func check_status_for_url(id: String, url: String) -> Client.Status:
 	if client == null:
 		return Client.Status.NOT_CONFIGURED
 	return _dispatch_check_status(client, url)
+
+
+static func configured_client_count_for_url(url: String) -> int:
+	var count := 0
+	for id in client_ids():
+		var status := check_status_for_url(String(id), url)
+		if status == Client.Status.CONFIGURED or status == Client.Status.CONFIGURED_MISMATCH:
+			count += 1
+	return count
 
 
 static func check_status_for_url_with_cli_path(id: String, url: String, cli_path: String) -> Client.Status:
