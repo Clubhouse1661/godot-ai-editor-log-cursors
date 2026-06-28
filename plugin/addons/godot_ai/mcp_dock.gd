@@ -625,6 +625,7 @@ func _build_ui() -> void:
 
 	_server_label = Label.new()
 	_server_label.add_theme_color_override("font_color", COLOR_MUTED)
+	_make_label_shrinkable(_server_label)
 	_dev_section.add_child(_server_label)
 	_refresh_server_label()
 
@@ -1164,6 +1165,7 @@ func _refresh_server_label() -> void:
 	if _plugin != null and _plugin.has_method("get_resolved_ws_port"):
 		ws_port = int(_plugin.get_resolved_ws_port())
 	_server_label.text = "WS: %d  HTTP: %d" % [ws_port, ClientConfigurator.http_port()]
+	_server_label.tooltip_text = _server_label.text
 
 
 # --- Telemetry setting persistence ---
@@ -1353,11 +1355,13 @@ func _refresh_server_version_label(server_status: Dictionary = {}) -> void:
 			or (is_incompatible and can_recover and _crash_restart_btn == null)
 		)
 	if text == _last_rendered_server_text:
+		_setup_server_label.tooltip_text = text
 		_setup_server_label.add_theme_color_override("font_color", color)
 		_update_restart_button(show_restart)
 		return
 	_last_rendered_server_text = text
 	_setup_server_label.text = text
+	_setup_server_label.tooltip_text = text
 	_setup_server_label.add_theme_color_override("font_color", color)
 	_update_restart_button(show_restart)
 
@@ -1464,6 +1468,7 @@ func _refresh_setup_status() -> void:
 		server_row.add_child(key_label)
 		_setup_server_label = Label.new()
 		_setup_server_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		_make_label_shrinkable(_setup_server_label)
 		server_row.add_child(_setup_server_label)
 		_version_restart_btn = Button.new()
 		_version_restart_btn.text = "Restart"
@@ -1523,9 +1528,18 @@ func _make_status_row(label_text: String, value_text: String, value_color: Color
 	var value := Label.new()
 	value.text = value_text
 	value.add_theme_color_override("font_color", value_color)
+	_make_label_shrinkable(value)
+	value.tooltip_text = value_text
 	row.add_child(value)
 
 	return row
+
+
+func _make_label_shrinkable(label: Label) -> void:
+	label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	label.clip_text = true
+	label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
+	label.mouse_filter = Control.MOUSE_FILTER_STOP
 
 
 ## Pure helper for the primary "Restart Dev Server" button. Always enabled

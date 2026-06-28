@@ -117,6 +117,47 @@ func test_install_label_mouse_filter_allows_tooltip() -> void:
 	assert_eq(_dock._install_label.mouse_filter, Control.MOUSE_FILTER_STOP)
 
 
+func _assert_label_shrink_capable(label: Label, message_prefix: String) -> void:
+	assert_true(label.clip_text, "%s should clip text instead of widening the dock" % message_prefix)
+	assert_eq(
+		label.text_overrun_behavior,
+		TextServer.OVERRUN_TRIM_ELLIPSIS,
+		"%s should use ellipsis overrun" % message_prefix
+	)
+	assert_eq(
+		label.mouse_filter,
+		Control.MOUSE_FILTER_STOP,
+		"%s should accept hover so its tooltip can show the full value" % message_prefix
+	)
+	assert_eq(
+		label.size_flags_horizontal,
+		Control.SIZE_EXPAND_FILL,
+		"%s should take available width while still being shrinkable" % message_prefix
+	)
+
+
+func test_status_row_value_label_is_shrink_capable() -> void:
+	var row: HBoxContainer = _dock._make_status_row(
+		"uv",
+		"uv-tool-uvx 0.5.9 (0652800cb 2024-12-13 x86_64-pc-windows-msvc)",
+		Color.GREEN
+	)
+	var value := row.get_child(1) as Label
+	assert_true(value != null, "Status row value label should exist")
+	_assert_label_shrink_capable(value, "Setup value label")
+	assert_eq(value.tooltip_text, value.text,
+		"Setup value tooltip should preserve the full single-line value")
+	row.free()
+
+
+func test_server_label_is_shrink_capable() -> void:
+	_dock._build_ui()
+	_dock._refresh_server_label()
+	_assert_label_shrink_capable(_dock._server_label, "WS/HTTP server label")
+	assert_false(_dock._server_label.tooltip_text.is_empty(),
+		"WS/HTTP server label tooltip should preserve the full value")
+
+
 func test_clients_header_and_actions_use_narrow_layout() -> void:
 	## The dock's minimum width is the max of the direct VBox children. Keep
 	## the Clients section split so the header/count and action buttons do not
@@ -564,6 +605,7 @@ func _seed_server_row(server_ver: String) -> McpConnection:
 	var conn := McpConnection.new()
 	_dock._connection = conn
 	_dock._setup_server_label = Label.new()
+	_dock._make_label_shrinkable(_dock._setup_server_label)
 	_dock._version_restart_btn = Button.new()
 	_dock._version_restart_btn.visible = false
 	_dock._last_rendered_server_text = ""
@@ -591,6 +633,16 @@ func test_server_version_label_muted_when_ack_not_received() -> void:
 		"checking live version (expected godot-ai == %s)" % plugin_ver
 	)
 	assert_false(_dock._version_restart_btn.visible, "Restart button stays hidden pre-ack")
+	_cleanup_server_row(conn)
+
+
+func test_setup_server_label_is_shrink_capable() -> void:
+	var plugin_ver := McpClientConfigurator.get_plugin_version()
+	var conn := _seed_server_row(plugin_ver)
+	_dock._refresh_server_version_label()
+	_assert_label_shrink_capable(_dock._setup_server_label, "Setup server label")
+	assert_eq(_dock._setup_server_label.tooltip_text, _dock._setup_server_label.text,
+		"Setup server label tooltip should track the current dynamic text")
 	_cleanup_server_row(conn)
 
 
