@@ -4,6 +4,7 @@ extends McpTestSuite
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
 const NodeHandler := preload("res://addons/godot_ai/handlers/node_handler.gd")
+const TypedContainerNodeFixture := preload("res://tests/mcp_typed_container_node_fixture.gd")
 
 ## Tests for NodeHandler — node reads and writes.
 
@@ -11,6 +12,7 @@ var _handler: NodeHandler
 var _undo_redo: EditorUndoRedoManager
 
 const TEST_MATERIAL_PATH := "res://tests/_mcp_test_material.tres"
+const TEST_TEXTURE_PATH := "res://tests/_mcp_test_texture.tres"
 
 
 func suite_name() -> String:
@@ -22,11 +24,35 @@ func suite_setup(ctx: Dictionary) -> void:
 	_handler = NodeHandler.new(_undo_redo)
 	var mat := StandardMaterial3D.new()
 	ResourceSaver.save(mat, TEST_MATERIAL_PATH)
+	var tex := GradientTexture2D.new()
+	tex.gradient = Gradient.new()
+	ResourceSaver.save(tex, TEST_TEXTURE_PATH)
 
 
 func suite_teardown() -> void:
 	if FileAccess.file_exists(TEST_MATERIAL_PATH):
 		DirAccess.remove_absolute(TEST_MATERIAL_PATH)
+	if FileAccess.file_exists(TEST_TEXTURE_PATH):
+		DirAccess.remove_absolute(TEST_TEXTURE_PATH)
+
+
+func _add_typed_container_node(node_name: String) -> Node:
+	var scene_root := EditorInterface.get_edited_scene_root()
+	if scene_root == null:
+		return null
+	var node: Node = TypedContainerNodeFixture.new()
+	node.name = node_name
+	scene_root.add_child(node)
+	node.set_owner(scene_root)
+	return node
+
+
+func _remove_node(node: Node) -> void:
+	if node == null:
+		return
+	if node.get_parent() != null:
+		node.get_parent().remove_child(node)
+	node.queue_free()
 
 
 # ----- get_children -----
@@ -340,6 +366,115 @@ func test_set_property_vector3_accepts_valid_dict() -> void:
 	assert_eq(node.position, Vector3(1, 2, 3))
 	assert_true(editor_undo(_undo_redo), "undo set should succeed")
 	assert_true(editor_undo(_undo_redo), "undo create should succeed")
+
+
+func test_set_property_typed_array_ints_round_trips() -> void:
+	var node := _add_typed_container_node("_McpTypedInts")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.set_property({
+		"path": "/%s/_McpTypedInts" % node.get_parent().name,
+		"property": "ints",
+		"value": [1, 2, 3],
+	})
+	assert_has_key(result, "data", "Expected typed Array[int] write to succeed; got: %s" % str(result))
+	var stored: Array = node.get("ints")
+	assert_eq(stored.size(), 3)
+	assert_eq(stored[1], 2)
+	assert_true(stored.is_typed(), "stored Array[int] should remain typed")
+	assert_true(editor_undo(_undo_redo), "undo set should succeed")
+	_remove_node(node)
+
+
+func test_set_property_typed_array_vector3_coerces_dict_elements() -> void:
+	var node := _add_typed_container_node("_McpTypedVec3s")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.set_property({
+		"path": "/%s/_McpTypedVec3s" % node.get_parent().name,
+		"property": "vec3s",
+		"value": [{"x": 1, "y": 2, "z": 3}],
+	})
+	assert_has_key(result, "data", "Expected typed Array[Vector3] write to succeed; got: %s" % str(result))
+	var stored: Array = node.get("vec3s")
+	assert_eq(stored.size(), 1)
+	assert_true(stored[0] is Vector3)
+	assert_eq(stored[0], Vector3(1, 2, 3))
+	assert_true(editor_undo(_undo_redo), "undo set should succeed")
+	_remove_node(node)
+
+
+func test_set_property_typed_array_texture_loads_resource_paths() -> void:
+	var node := _add_typed_container_node("_McpTypedTextures")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.set_property({
+		"path": "/%s/_McpTypedTextures" % node.get_parent().name,
+		"property": "textures",
+		"value": [TEST_TEXTURE_PATH],
+	})
+	assert_has_key(result, "data", "Expected typed Array[Texture2D] write to succeed; got: %s" % str(result))
+	var stored: Array = node.get("textures")
+	assert_eq(stored.size(), 1)
+	assert_true(stored[0] is GradientTexture2D)
+	assert_true(editor_undo(_undo_redo), "undo set should succeed")
+	_remove_node(node)
+
+
+func test_set_property_typed_array_wrong_element_errors_and_keeps_old_value() -> void:
+	var node := _add_typed_container_node("_McpTypedBadElement")
+	if node == null:
+		skip("No scene root")
+		return
+	(node as McpTypedContainerNodeFixture).ints = [9]
+	var result := _handler.set_property({
+		"path": "/%s/_McpTypedBadElement" % node.get_parent().name,
+		"property": "ints",
+		"value": [1, "x", 3],
+	})
+	assert_is_error(result, ErrorCodes.WRONG_TYPE)
+	assert_contains(result.error.message, "[1]", "error should name the bad array index")
+	var stored: Array = node.get("ints")
+	assert_eq(stored.size(), 1)
+	assert_eq(stored[0], 9)
+	_remove_node(node)
+
+
+func test_set_property_typed_array_rejects_non_array_value() -> void:
+	var node := _add_typed_container_node("_McpTypedNonArray")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.set_property({
+		"path": "/%s/_McpTypedNonArray" % node.get_parent().name,
+		"property": "ints",
+		"value": {"a": 1},
+	})
+	assert_is_error(result, ErrorCodes.WRONG_TYPE)
+	assert_contains(result.error.message, "Array")
+	assert_eq((node.get("ints") as Array).size(), 0)
+	_remove_node(node)
+
+
+func test_set_property_untyped_array_still_round_trips() -> void:
+	var node := _add_typed_container_node("_McpUntypedArray")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.set_property({
+		"path": "/%s/_McpUntypedArray" % node.get_parent().name,
+		"property": "loose",
+		"value": [1, "two", {"three": 3}],
+	})
+	assert_has_key(result, "data")
+	var stored: Array = node.get("loose")
+	assert_eq(stored.size(), 3)
+	assert_eq(stored[1], "two")
+	assert_true(editor_undo(_undo_redo), "undo set should succeed")
+	_remove_node(node)
 
 
 func test_set_property_vector3_rejects_color_shaped_dict() -> void:

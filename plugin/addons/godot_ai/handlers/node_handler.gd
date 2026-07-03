@@ -193,10 +193,12 @@ func set_property(params: Dictionary) -> Dictionary:
 
 	var found := false
 	var prop_type: int = TYPE_NIL
+	var prop_hint_string := ""
 	for prop in node.get_property_list():
 		if prop.name == property:
 			found = true
 			prop_type = prop.get("type", TYPE_NIL)
+			prop_hint_string = prop.get("hint_string", "")
 			break
 	if not found:
 		return ErrorCodes.make(ErrorCodes.PROPERTY_NOT_ON_CLASS, McpPropertyErrors.build_message(node, property))
@@ -221,38 +223,31 @@ func set_property(params: Dictionary) -> Dictionary:
 	var nil_resource_string: bool = target_type == TYPE_NIL and (value == "" or (value is String and value.begins_with("res://")))
 	var resource_string_value: bool = value is String and (target_type == TYPE_OBJECT or nil_resource_string)
 	if resource_string_value:
-		if value == "":
-			value = null
-		else:
-			var value_path_err = McpPathValidator.loadable_error(value, "value")
-			if value_path_err != null:
-				return value_path_err
-			if not ResourceLoader.exists(value):
-				return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "Resource not found: %s" % value)
-			var loaded := ResourceLoader.load(value)
-			if loaded == null:
-				return ErrorCodes.make(ErrorCodes.RESOURCE_NOT_FOUND, "Resource not found: %s" % value)
-			value = loaded
+		var resolved_object_value := ResourceHandler._resolve_object_value(value)
+		if resolved_object_value is Dictionary:
+			return resolved_object_value
+		value = resolved_object_value
 	elif target_type == TYPE_OBJECT and value is Dictionary and value.has("__class__"):
 		# Shortcut: {"__class__": "BoxMesh", "size": {...}} instantiates a
 		# fresh Resource subclass and applies the remaining keys as
 		# properties. Mirrors resource_create's inline-assign path but
 		# avoids a separate tool call for the common case.
-		var type_str: String = value.get("__class__", "")
-		var made := ResourceHandler._instantiate_resource(type_str)
-		if made is Dictionary:
-			return made
-		var res: Resource = made
-		var remaining: Dictionary = (value as Dictionary).duplicate()
-		remaining.erase("__class__")
-		if not remaining.is_empty():
-			var apply_err := ResourceHandler._apply_resource_properties(res, remaining)
-			if apply_err != null:
-				return apply_err
-		value = res
+		var made_object_value := ResourceHandler._resolve_object_value(value)
+		if made_object_value is Dictionary:
+			return made_object_value
+		value = made_object_value
 		instantiated_resource = true
 	else:
-		value = _coerce_value(value, target_type)
+		if target_type == TYPE_ARRAY and old_value is Array:
+			var typed_array := _coerce_typed_array_for_property(value, old_value, prop_hint_string)
+			if typed_array != null:
+				if typed_array is Dictionary:
+					return typed_array
+				value = typed_array
+			else:
+				value = _coerce_value(value, target_type)
+		else:
+			value = _coerce_value(value, target_type)
 		## Refuse any value that didn't land as the target compound Variant
 		## — wrong-shape dict (#123) or non-dict input like list / JSON string
 		## that used to silently default-construct Vector3.ZERO (#191).
@@ -694,6 +689,141 @@ static func _check_dict_coerce_failed(value: Variant, target_type: int) -> Varia
 ## Dictionary→Vector2/Vector3/Color cases REQUIRE all canonical keys;
 ## wrong-shape dicts flow through unchanged. See issue #123 — previous
 ## `dict.get(key, 0)` defaults silently zero-filled missing axes.
+static func _element_prefix(prefix: String, index: int) -> String:
+	if prefix.is_empty():
+		return "element [%d]" % index
+	return "%s element [%d]" % [prefix, index]
+
+
+static func _object_matches_class(value: Variant, expected_class: String, script: Variant = null) -> bool:
+	if value == null:
+		return true
+	if not (value is Object):
+		return false
+	var obj: Object = value
+	if script is Script:
+		var obj_script: Variant = obj.get_script()
+		while obj_script is Script:
+			if obj_script == script:
+				return true
+			obj_script = obj_script.get_base_script()
+		return false
+	if expected_class.is_empty():
+		return true
+	if ClassDB.class_exists(expected_class) and ClassDB.is_parent_class(obj.get_class(), expected_class):
+		return true
+	var scr: Variant = obj.get_script()
+	while scr is Script:
+		if String(scr.get_global_name()) == expected_class:
+			return true
+		scr = scr.get_base_script()
+	return false
+
+
+static func _global_class_script(expected_class: String) -> Variant:
+	if expected_class.is_empty():
+		return null
+	for entry in ProjectSettings.get_global_class_list():
+		if entry.get("class", "") == expected_class:
+			var script_path: String = entry.get("path", "")
+			return load(script_path)
+	return null
+
+
+static func _typed_array_template_from_hint(template: Array, hint_string: String) -> Variant:
+	if template.is_typed():
+		return template
+	if hint_string.is_empty():
+		return null
+	var colon_idx := hint_string.find(":")
+	var slash_idx := hint_string.find("/")
+	var type_end := colon_idx
+	if type_end < 0 or (slash_idx >= 0 and slash_idx < type_end):
+		type_end = slash_idx
+	if type_end < 0:
+		return null
+	var type_token := hint_string.substr(0, type_end)
+	if not type_token.is_valid_int():
+		return null
+	var element_type := int(type_token)
+	var element_class := ""
+	var element_script: Variant = null
+	if element_type == TYPE_OBJECT and colon_idx >= 0 and colon_idx + 1 < hint_string.length():
+		element_class = hint_string.substr(colon_idx + 1)
+		element_script = _global_class_script(element_class)
+	return Array([], element_type, StringName(element_class), element_script)
+
+
+static func _coerce_typed_array_for_property(value: Variant, template: Array, hint_string: String, prefix: String = "") -> Variant:
+	var typed_template = _typed_array_template_from_hint(template, hint_string)
+	if typed_template == null:
+		return null
+	return _coerce_typed_array(value, typed_template, prefix)
+
+
+static func _coerce_typed_array(value: Variant, template: Array, prefix: String = "") -> Variant:
+	if not (value is Array):
+		return ErrorCodes.prefix_message(
+			ErrorCodes.make(
+				ErrorCodes.WRONG_TYPE,
+				"Cannot coerce %s to typed Array; expected [...]" % type_string(typeof(value))
+			),
+			prefix,
+		)
+	var element_type := template.get_typed_builtin()
+	var element_class := String(template.get_typed_class_name())
+	var element_script: Variant = template.get_typed_script()
+	var element_label := element_class
+	if element_label.is_empty() and element_script is Script:
+		element_label = String(element_script.get_global_name())
+	var coerced: Array = []
+	var input: Array = value
+	for i in range(input.size()):
+		var item = input[i]
+		var item_prefix := _element_prefix(prefix, i)
+		if element_type == TYPE_OBJECT:
+			var resolved := ResourceHandler._resolve_object_value(item)
+			if resolved is Dictionary:
+				return ErrorCodes.prefix_message(resolved, item_prefix)
+			if not _object_matches_class(resolved, element_class, element_script):
+				return ErrorCodes.prefix_message(
+					ErrorCodes.make(
+						ErrorCodes.WRONG_TYPE,
+						"Cannot coerce %s to %s" % [type_string(typeof(item)), element_label]
+					),
+					item_prefix,
+				)
+			coerced.append(resolved)
+		elif element_type == TYPE_ARRAY:
+			if not (item is Array):
+				return ErrorCodes.prefix_message(
+					ErrorCodes.make(
+						ErrorCodes.WRONG_TYPE,
+						"Cannot coerce %s to Array; expected [...]" % type_string(typeof(item))
+					),
+					item_prefix,
+				)
+			coerced.append(item)
+		else:
+			var c = _coerce_value(item, element_type)
+			var coerce_err := _check_coerced(c, element_type, item_prefix)
+			if coerce_err != null:
+				return coerce_err
+			coerced.append(c)
+	var out: Array = template.duplicate()
+	out.clear()
+	out.assign(coerced)
+	if out.size() != coerced.size():
+		return ErrorCodes.prefix_message(
+			ErrorCodes.make(
+				ErrorCodes.WRONG_TYPE,
+				"Cannot assign values to typed Array[%s]" % (element_label if element_type == TYPE_OBJECT else type_string(element_type))
+			),
+			prefix,
+		)
+	return out
+
+
 static func _coerce_value(value: Variant, target_type: int) -> Variant:
 	match target_type:
 		TYPE_VECTOR2:
@@ -785,7 +915,11 @@ static func _coerce_value(value: Variant, target_type: int) -> Variant:
 					elif item is Dictionary and item.has_all(COLOR_KEYS):
 						out.append(Color(item["r"], item["g"], item["b"], item.get("a", 1.0)))
 					elif item is String:
-						out.append(Color(item))
+						var col_a := Color.from_string(item, Color(0, 0, 0, 0))
+						var col_b := Color.from_string(item, Color(1, 1, 1, 1))
+						if col_a != col_b:
+							return value
+						out.append(col_a)
 					else:
 						return value
 				return out

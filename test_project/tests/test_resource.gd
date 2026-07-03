@@ -4,11 +4,14 @@ extends McpTestSuite
 const ErrorCodes := preload("res://addons/godot_ai/utils/error_codes.gd")
 
 const ResourceHandler := preload("res://addons/godot_ai/handlers/resource_handler.gd")
+const TypedContainerNodeFixture := preload("res://tests/mcp_typed_container_node_fixture.gd")
 
 ## Tests for ResourceHandler — resource search, load, and assign.
 
 var _handler: ResourceHandler
 var _undo_redo: EditorUndoRedoManager
+
+const TEST_TEXTURE_PATH := "res://tests/_mcp_resource_test_texture.tres"
 
 
 func suite_name() -> String:
@@ -18,6 +21,14 @@ func suite_name() -> String:
 func suite_setup(ctx: Dictionary) -> void:
 	_undo_redo = ctx.get("undo_redo")
 	_handler = ResourceHandler.new(_undo_redo)
+	var tex := GradientTexture2D.new()
+	tex.gradient = Gradient.new()
+	ResourceSaver.save(tex, TEST_TEXTURE_PATH)
+
+
+func suite_teardown() -> void:
+	if FileAccess.file_exists(TEST_TEXTURE_PATH):
+		DirAccess.remove_absolute(TEST_TEXTURE_PATH)
 
 
 # ----- search_resources -----
@@ -146,6 +157,22 @@ func test_assign_resource_resource_not_found() -> void:
 	assert_is_error(result, ErrorCodes.RESOURCE_NOT_FOUND)
 
 
+func test_assign_resource_rejects_single_resource_for_typed_array_slot() -> void:
+	var node := _add_typed_container_node("TestAssignTypedArray")
+	if node == null:
+		skip("No scene root")
+		return
+	var result := _handler.assign_resource({
+		"path": "/%s/TestAssignTypedArray" % node.get_parent().name,
+		"property": "textures",
+		"resource_path": TEST_TEXTURE_PATH,
+	})
+	assert_is_error(result, ErrorCodes.WRONG_TYPE)
+	assert_contains(result.error.message, "typed-array")
+	assert_eq((node.get("textures") as Array).size(), 0)
+	_remove_node(node)
+
+
 # ----- create_resource -----
 
 func _add_mesh_instance(node_name: String = "TestMesh") -> Node:
@@ -157,6 +184,17 @@ func _add_mesh_instance(node_name: String = "TestMesh") -> Node:
 	scene_root.add_child(mi)
 	mi.set_owner(scene_root)
 	return mi
+
+
+func _add_typed_container_node(node_name: String) -> Node:
+	var scene_root := EditorInterface.get_edited_scene_root()
+	if scene_root == null:
+		return null
+	var node: Node = TypedContainerNodeFixture.new()
+	node.name = node_name
+	scene_root.add_child(node)
+	node.set_owner(scene_root)
+	return node
 
 
 func _remove_node(node: Node) -> void:
@@ -711,6 +749,65 @@ func test_create_resource_custom_class_to_file() -> void:
 	var loaded := load(out_path)
 	assert_true(loaded is MyTestResource, "saved resource should load as MyTestResource")
 	assert_eq(loaded.label, "hi")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(out_path))
+
+
+func test_apply_properties_typed_array_custom_resources() -> void:
+	var host := MyTestResource.new()
+	var err: Variant = ResourceHandler._apply_resource_properties(host, {
+		"items": [
+			{"__class__": "MyTestResource", "label": "a"},
+			{"__class__": "MyTestResource", "label": "b"},
+		],
+	})
+	assert_true(err == null, "typed Array[MyTestResource] should apply cleanly; got: %s" % str(err))
+	assert_eq(host.items.size(), 2)
+	assert_true(host.items[0] is MyTestResource)
+	assert_eq(host.items[0].label, "a")
+
+
+func test_apply_properties_typed_array_texture_resource_paths() -> void:
+	var host := MyTestResource.new()
+	var err: Variant = ResourceHandler._apply_resource_properties(host, {
+		"textures": [TEST_TEXTURE_PATH],
+	})
+	assert_true(err == null, "typed Array[Texture2D] should load resource paths; got: %s" % str(err))
+	assert_eq(host.textures.size(), 1)
+	assert_true(host.textures[0] is GradientTexture2D)
+
+
+func test_apply_properties_typed_array_wrong_element_names_index_and_keeps_old_value() -> void:
+	var host := MyTestResource.new()
+	host.ints = [7]
+	var err: Variant = ResourceHandler._apply_resource_properties(host, {
+		"ints": [1, "x", 3],
+	})
+	assert_true(err is Dictionary, "expected typed-array element error; got: %s" % str(err))
+	if err is Dictionary:
+		assert_eq(err.error.code, ErrorCodes.WRONG_TYPE)
+		assert_contains(err.error.message, "[1]")
+	assert_eq(host.ints.size(), 1)
+	assert_eq(host.ints[0], 7)
+
+
+func test_create_resource_properties_applied_reflects_populated_typed_array() -> void:
+	var out_path := "res://tests/_mcp_test_custom_resource_typed_array.tres"
+	if FileAccess.file_exists(out_path):
+		DirAccess.remove_absolute(ProjectSettings.globalize_path(out_path))
+	var result := _handler.create_resource({
+		"type": "MyTestResource",
+		"resource_path": out_path,
+		"properties": {
+			"items": [{"__class__": "MyTestResource", "label": "child"}],
+		},
+	})
+	assert_has_key(result, "data", "Expected resource_create success; got: %s" % str(result))
+	assert_eq(result.data.properties_applied, 1)
+	var loaded := load(out_path)
+	assert_true(loaded is MyTestResource)
+	if loaded is MyTestResource:
+		assert_eq((loaded as MyTestResource).items.size(), 1)
+		assert_eq((loaded as MyTestResource).items[0].label, "child")
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(out_path))
 
 

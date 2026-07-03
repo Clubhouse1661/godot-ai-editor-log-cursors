@@ -126,9 +126,13 @@ func assign_resource(params: Dictionary) -> Dictionary:
 
 	# Verify property exists
 	var found := false
+	var prop_type: int = TYPE_NIL
+	var prop_hint_string := ""
 	for prop in node.get_property_list():
 		if prop.name == property:
 			found = true
+			prop_type = prop.get("type", TYPE_NIL)
+			prop_hint_string = prop.get("hint_string", "")
 			break
 	if not found:
 		return ErrorCodes.make(ErrorCodes.PROPERTY_NOT_ON_CLASS, McpPropertyErrors.build_message(node, property))
@@ -141,6 +145,22 @@ func assign_resource(params: Dictionary) -> Dictionary:
 		return ErrorCodes.make(ErrorCodes.INTERNAL_ERROR, "Failed to load resource: %s" % resource_path)
 
 	var old_value = node.get(property)
+	if prop_type == TYPE_NIL:
+		prop_type = typeof(old_value)
+	if (
+		prop_type == TYPE_ARRAY
+		and old_value is Array
+		and NodeHandler._typed_array_template_from_hint(old_value, prop_hint_string) != null
+	):
+		return ErrorCodes.make(
+			ErrorCodes.WRONG_TYPE,
+			"Cannot assign a single Resource to a typed-array slot; use resource_create or node_set_property with a JSON array"
+		)
+	if prop_type != TYPE_NIL and prop_type != TYPE_OBJECT:
+		return ErrorCodes.make(
+			ErrorCodes.PROPERTY_NOT_ON_CLASS,
+			"Property '%s' on %s is not an Object slot (type %s)" % [property, node.get_class(), type_string(prop_type)]
+		)
 
 	_undo_redo.create_action("MCP: Assign %s to %s.%s" % [resource_path.get_file(), node.name, property])
 	_undo_redo.add_do_property(node, property, res)
@@ -286,13 +306,54 @@ static func _instantiate_resource(type_str: String) -> Variant:
 	return _unknown_resource_type_error(type_str)
 
 
+## Resolve one Object/Resource-shaped JSON value. Accepts null/"" clears,
+## res:// strings, and {"__class__": "..."} resource construction.
+static func _resolve_object_value(
+	value: Variant,
+	path_label: String = "value",
+	missing_code: String = ErrorCodes.RESOURCE_NOT_FOUND,
+	missing_message_template: String = "Resource not found: %s",
+	class_error_suffix: String = ""
+) -> Variant:
+	if value == null or (value is String and (value as String).is_empty()):
+		return null
+	if value is String:
+		var path_err = McpPathValidator.loadable_error(value, path_label)
+		if path_err != null:
+			return path_err
+		if not ResourceLoader.exists(value):
+			return ErrorCodes.make(missing_code, missing_message_template % value)
+		var loaded := ResourceLoader.load(value)
+		if loaded == null:
+			return ErrorCodes.make(missing_code, missing_message_template % value)
+		return loaded
+	if value is Dictionary and value.has("__class__"):
+		var type_str: String = value.get("__class__", "")
+		var made := _instantiate_resource(type_str)
+		if made is Dictionary:
+			if not class_error_suffix.is_empty():
+				made["error"]["message"] = "%s%s" % [made["error"]["message"], class_error_suffix]
+			return made
+		var res: Resource = made
+		var remaining: Dictionary = (value as Dictionary).duplicate()
+		remaining.erase("__class__")
+		if not remaining.is_empty():
+			var apply_err := _apply_resource_properties(res, remaining)
+			if apply_err != null:
+				return apply_err
+		return res
+	return value
+
+
 ## Apply a dict of property values to a freshly-instantiated Resource,
 ## reusing NodeHandler's coercion so Vector3/Color/etc. dicts land typed.
 ## Returns null on success or an error dict on failure.
 static func _apply_resource_properties(res: Resource, properties: Dictionary) -> Variant:
 	var prop_types := {}
+	var prop_hints := {}
 	for prop in res.get_property_list():
 		prop_types[prop.name] = prop.get("type", TYPE_NIL)
+		prop_hints[prop.name] = prop.get("hint_string", "")
 	for key in properties.keys():
 		if not prop_types.has(key):
 			var valid: Array[String] = []
@@ -337,23 +398,27 @@ static func _apply_resource_properties(res: Resource, properties: Dictionary) ->
 			# node_handler.set_property accepts, now also supported here so
 			# resource_create/environment_create callers can populate
 			# sub-resource slots (ShaderMaterial.shader, etc.) in one shot.
-			var sub_type: String = v.get("__class__", "")
-			# Resolve via the shared helper so the nested shortcut accepts both
-			# engine built-ins (ClassDB) and project `class_name` Resources,
-			# exactly like the top-level resource_create path.
-			var sub_made := _instantiate_resource(sub_type)
-			if sub_made is Dictionary:
-				# Preserve the property-slot context the inline path used to add.
-				sub_made["error"]["message"] = "%s (for property '%s')" % [sub_made["error"]["message"], key]
-				return sub_made
-			var sub_res: Resource = sub_made
-			var remaining: Dictionary = (v as Dictionary).duplicate()
-			remaining.erase("__class__")
-			if not remaining.is_empty():
-				var nested_err := _apply_resource_properties(sub_res, remaining)
-				if nested_err != null:
-					return nested_err
-			v = sub_res
+			var resolved := _resolve_object_value(
+				v,
+				"property '%s'" % key,
+				ErrorCodes.INVALID_PARAMS,
+				"Resource not found at path '%s' for property '" + key + "'",
+				" (for property '%s')" % key
+			)
+			if resolved is Dictionary:
+				return resolved
+			v = resolved
+		elif target_type == TYPE_ARRAY and res.get(key) is Array:
+			var typed_array := NodeHandler._coerce_typed_array_for_property(v, res.get(key), prop_hints.get(key, ""), "Property '%s'" % key)
+			if typed_array != null:
+				if typed_array is Dictionary:
+					return typed_array
+				v = typed_array
+			else:
+				v = NodeHandler._coerce_value(v, target_type)
+				var array_coerce_err := NodeHandler._check_coerced(v, target_type, "Property '%s'" % key)
+				if array_coerce_err != null:
+					return array_coerce_err
 		else:
 			v = NodeHandler._coerce_value(v, target_type)
 			## Mirror set_property's coerce check: wrong-shape dicts (#123) and

@@ -8,6 +8,12 @@ extends Resource
 ## class_name so the tests can reference MyTestResource by type.
 
 @export var label: String = ""
+@export var ints: Array[int] = []
+@export var strings: Array[String] = []
+@export var vec3s: Array[Vector3] = []
+@export var textures: Array[Texture2D] = []
+@export var items: Array[MyTestResource] = []
+@export var nested: Array[Array] = []
 
 ## Sub-resource slot used by the nested-`__class__` shortcut tests: a generic
 ## Resource slot so a custom class_name Resource can be nested under it.
